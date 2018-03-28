@@ -4,6 +4,21 @@ module Helpers where
 import Data.Maybe
 import Text.Printf
 
+--sort a list, with a function returning a single double on every element on the list
+--return the sorted list
+inductorSort :: [a] -> (a -> Double) -> [a]
+inductorSort [] func = []
+inductorSort (x:xs) func =
+    let smaller = inductorSort [a | a <- xs, (func a) <= (func x)] func
+        bigger = inductorSort [a | a <- xs, (func a) > (func x)] func
+    in smaller ++ [x] ++ bigger
+
+sumSort :: [[Double]] -> [[Double]]
+sumSort list = inductorSort list sum
+
+sumSortWith :: [a] -> (a -> [Double]) -> [a]
+sumSortWith list func = inductorSort list (sum . func)
+
 makeSine :: Int -> Int -> [Double]
 makeSine len times 
     | times == 0 = replicate len 1.0

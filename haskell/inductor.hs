@@ -5,21 +5,61 @@ import Data.Maybe
 import Helpers
 import Wire
 
-inductorSort :: [a] -> (a -> Double) -> [a]
-inductorSort [] func = []
-inductorSort (x:xs) func =
-    let smaller = inductorSort [a | a <- xs, (func a) <= (func x)] func
-        bigger = inductorSort [a | a <- xs, (func a) > (func x)] func
-    in smaller ++ [x] ++ bigger
-
 --ToroidRect is a toroid with a rectangular cross section
 --EEcore is a core made of two E shape sections
 data Shape = ToroidRect Double Double Double | EEcore Double Double deriving (Show)
 
+--many things can be calculated knowing only the shape of an inductor
+
 calcVolume :: Shape -> Double
 calcVolume (ToroidRect id od thick) = ((od * od * 0.25) - (id * id * 0.25)) * pi * thick
 
+calcWindingArea :: Shape -> Double
+calcWindingArea (ToroidRect id od thick) = pi * 0.25 * id * id
+
+calcWireMaxVolume :: Shape -> Double
+calcWireMaxVolume (ToroidRect id od th) = pi*ir*ir * (ir + h + 2*(or - ir)) + (pi * id * id / od + pi * h) * ((id*id+od*od)/4 - or*or)
+    where od2 = ((id*id)+(od*od))**0.5
+          ir = id * 0.5
+          or = od * 0.5
+          h = th * 0.5
+
+calcMagLength (ToroidRect id od thick) = pi * (id + od) * 0.5
+calcMagArea (ToroidRect id od thick) = (od-id) * 0.5 * thick
+
+calcWindingPercent s turns c = (pi * 0.25 * (cableOD c) * (cableOD c) * turns) / (calcWindingArea s)
+
+calcWireLayers :: Shape -> Cable -> Double
+calcWireLayers (ToroidRect id od thick) c = fromIntegral(floor ((sqrt 0.3) * id * 0.5 / (cableOD c)))
+
+calcWireLayerTurns :: Shape -> Cable -> Double -> Double
+calcWireLayerTurns (ToroidRect id od thick) c n = fromIntegral (floor ((id - ((n - 0.5) * (cableOD c))) * pi / (cableOD c)))
+
+calcWireMaxTurns t c = fromIntegral(floor((calcWindingArea t) / (pi * (cableOD c)**2 * 0.25)))
+
+calcWireLayerTurnLength :: Shape -> Cable -> Double -> Double
+calcWireLayerTurnLength (ToroidRect id od thick) c n = od-id+thick+thick+(cableOD c)+(cableOD c)+4*(cableOD c)*(n-1)
+
+calcWireMaxLength t c = wire_volume / wire_area
+    where wire_area = (cableOD c)**2 * pi * 0.25
+          wire_volume = calcWireMaxVolume t
+
+calcWireLength t w turns = (turns / (calcWireMaxTurns t w)) * (calcWireMaxLength t w)       
+          
+--at / cm
+calcH :: Shape -> Double -> Double -> Double
+calcH (ToroidRect id od thick) turns current = 0.01 * turns * current / (pi * (id + od) * 0.5)
+
+--create an array of inductor shapes by tweaking an existing shape
+tweakInductor :: Shape -> Double -> Double -> [Shape]                             
+tweakInductor (ToroidRect x y z) gain steps  = outp
+    where mul = map ((10**) . (*gain) . (/10)) [-steps..steps]
+          outp = [ToroidRect mx y z | mx <- map (*x) mul, my <- map (*y) mul, mz <- map (*z) mul, my > mx]
+
 data Material = KoolMu14 | KoolMu26 | KoolMu40 | KoolMu60 | KoolMu75 | KoolMu90 | KoolMu125 | PC40 deriving (Show, Enum, Bounded)
+allMaterial = [(minBound::Material) ..]
+
+--a few things can be calculated knowing the material an inductor is made from
 
 absolute_permeability = 4*pi/10000000
 
@@ -54,6 +94,27 @@ calcCoreLossDensity mat flux freq = what mat
        what KoolMu125 = 1 * 71.9 * (flux ** 1.928) * ((freq/1000) ** 1.470)
        what PC40 = biLinearInterpolation pc40_cl_60c flux freq
 
+--material and H input, output B in tesla
+calcB :: Material -> Double -> Double
+calcB mat j
+ | j > 0 = what mat
+ | otherwise = (-(what mat))
+ where h = abs(j)
+       what KoolMu14 =  ((1.105e-1 + (1.301e-2 * h) + (6.115e-4 * h * h)) / (1 + (1.386e-1 * h) + (5.735e-4 * h * h))) ** 1.760
+       what KoolMu26 =  ((1.008e-1 + (1.452e-2 * h) + (7.846e-4 * h * h)) / (1 + (1.035e-1 * h) + (7.573e-4 * h * h))) ** 1.754
+       what KoolMu40 =  ((5.180e-2 + (2.132e-2 * h) + (7.941e-4 * h * h)) / (1 + (8.447e-2 * h) + (7.652e-4 * h * h))) ** 1.756
+       what KoolMu60 =  ((5.214e-2 + (2.299e-2 * h) + (8.537e-4 * h * h)) / (1 + (7.029e-2 * h) + (8.183e-4 * h * h))) ** 1.658
+       what KoolMu75 =  ((4.489e-2 + (2.593e-2 * h) + (7.949e-4 * h * h)) / (1 + (6.463e-2 * h) + (7.925e-4 * h * h))) ** 1.595
+       what KoolMu90 =  ((4.182e-2 + (2.990e-2 * h) + (7.826e-4 * h * h)) / (1 + (6.542e-2 * h) + (7.669e-4 * h * h))) ** 1.569
+       what KoolMu125 = ((1.414e-2 + (2.850e-2 * h) + (1.135e-3 * h * h)) / (1 + (7.550e-2 * h) + (1.088e-3 * h * h))) ** 1.274
+       what PC40 = (linearInterpolation pc40_bh_60c (h * 100)) * 0.001
+
+--some things need shape and material to calculate
+calcAL relPerm area length = (absolute_permeability) * relPerm * area / length
+calcShapeAL t mat = calcAL (permeability mat) (calcMagArea t) (calcMagLength t)
+calcL t mat current turns = (calcShapeAL t mat) * turns * turns * (permeability_bias mat (calcH t turns current)) 
+
+       
 --things to calculate
 --number of turns to achieve inductance at peak current
 --power loss in copper
@@ -71,28 +132,44 @@ data Inductor = Inductor {
     ind_wire_length :: Double
     } deriving (Show)
 
+makeInductor mat shape cable max_curr targetL toleranceL = 
+    Inductor achieved maxl mat shape turns percent cable length
+    where turns_math = last(calcTurns shape mat cable max_curr targetL toleranceL initial_turns)
+          initial_turns = fromIntegral(truncate ((targetL / (calcShapeAL shape mat))**0.5))
+          maxl = calcL shape mat 0.01 turns
+          achieved = snd (turns_math)
+          turns = fst (turns_math)
+          percent = calcWindingPercent shape turns cable
+          length = (calcWireLength shape cable turns)
+
 inductorImpedance ind freq = [a, b]
     where a = 2 * pi * freq * (ind_minL ind)
           b = 2 * pi * freq * (ind_maxL ind)
-    
-coreLossConversion mat freq input = calcCoreLossDensity mat input freq
 
 notfull ind = (ind_filled ind) < 0.7
+
+--sort a list of inductors, removing any that are overfull
+--sort based on power loss from lowest to highest
+inductorFilterSort :: [Inductor] -> [(Double,Double)] -> [Inductor]
+inductorFilterSort ind_l driver = sorted
+    where notFullList = filter notfull ind_l
+          sorted = inductorSort notFullList (totalInductorPower driver)
+
+          
+coreLossConversion mat freq input = calcCoreLossDensity mat input freq
 
 maybeInductorPower ind driver
  | isJust ind = Just(totalInductorPower driver (fromJust ind))
  | otherwise = Nothing
 
-ind_w_pwr driver ind = calcWirePower (ind_shape ind) (ind_wire ind) (ind_turns ind) driver
-ind_c_pwr driver ind = calcCorePower (ind_shape ind) (ind_mat ind) (ind_turns ind) (ind_wire ind) driver
+ind_w_pwr driver ind = (cablePower (ind_wire ind) driver) * (ind_wire_length ind)
+ind_c_pwr driver ind = calcCorePower (ind_shape ind) (ind_mat ind) (ind_turns ind) driver
 totalInductorPower driver ind = (ind_w_pwr driver ind) + (ind_c_pwr driver ind)
 ind_max_t ind max_curr = calcB (ind_mat ind) h
     where h = calcH (ind_shape ind) (ind_turns ind) max_curr
 
-calcWirePower t w turns s = cablePower w s
-
-calcCorePower :: Shape -> Material -> Double -> Cable -> [(Double, Double)] -> Double
-calcCorePower shape mat turns _ signal
+calcCorePower :: Shape -> Material -> Double -> [(Double, Double)] -> Double
+calcCorePower shape mat turns signal
     | (length signal == 2) = rmsCalc power_list
     | (length signal == 1) = density * volume * 1000
     where volume = calcVolume shape
@@ -101,24 +178,7 @@ calcCorePower shape mat turns _ signal
           density = (calcCoreLossDensity mat (flux (h (sqrt(2) * (snd (signal!!0))))) (fst (signal!!0)))
           power_list = pfc_core_loss shape mat turns signal
 
---at / cm
-calcH :: Shape -> Double -> Double -> Double
-calcH (ToroidRect id od thick) turns current = 0.01 * turns * current / (pi * (id + od) * 0.5)
 
---material and H input, output B in tesla
-calcB :: Material -> Double -> Double
-calcB mat j
- | j > 0 = what mat
- | otherwise = (-(what mat))
- where h = abs(j)
-       what KoolMu14 =  ((1.105e-1 + (1.301e-2 * h) + (6.115e-4 * h * h)) / (1 + (1.386e-1 * h) + (5.735e-4 * h * h))) ** 1.760
-       what KoolMu26 =  ((1.008e-1 + (1.452e-2 * h) + (7.846e-4 * h * h)) / (1 + (1.035e-1 * h) + (7.573e-4 * h * h))) ** 1.754
-       what KoolMu40 =  ((5.180e-2 + (2.132e-2 * h) + (7.941e-4 * h * h)) / (1 + (8.447e-2 * h) + (7.652e-4 * h * h))) ** 1.756
-       what KoolMu60 =  ((5.214e-2 + (2.299e-2 * h) + (8.537e-4 * h * h)) / (1 + (7.029e-2 * h) + (8.183e-4 * h * h))) ** 1.658
-       what KoolMu75 =  ((4.489e-2 + (2.593e-2 * h) + (7.949e-4 * h * h)) / (1 + (6.463e-2 * h) + (7.925e-4 * h * h))) ** 1.595
-       what KoolMu90 =  ((4.182e-2 + (2.990e-2 * h) + (7.826e-4 * h * h)) / (1 + (6.542e-2 * h) + (7.669e-4 * h * h))) ** 1.569
-       what KoolMu125 = ((1.414e-2 + (2.850e-2 * h) + (1.135e-3 * h * h)) / (1 + (7.550e-2 * h) + (1.088e-3 * h * h))) ** 1.274
-       what PC40 = (linearInterpolation pc40_bh_60c (h * 100)) * 0.001
 
 calcCorePowerMinMax shape mat turns fr minI maxI = density * volume * 1000
     where volume = calcVolume shape
@@ -166,65 +226,47 @@ makeInductorFindWire mat shape max_curr targetL toleranceL driver cond = maybeHe
     where rlist = [makeInductor mat shape x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
           notFullList = filter notfull rlist
 
-makeInductor mat shape cable max_curr targetL toleranceL = 
-    Inductor achieved maxl mat shape turns percent cable length
-    where turns_math = last(calcTurns shape mat cable max_curr targetL toleranceL initial_turns)
-          initial_turns = fromIntegral(truncate ((targetL / (calcShapeAL shape mat))**0.5))
-          maxl = calcL shape mat 0.01 turns
-          achieved = snd (turns_math)
-          turns = fst (turns_math)
-          percent = calcWindingPercent shape turns cable
-          length = (calcWireLength shape cable turns)
-
-calcAL relPerm area length = (absolute_permeability) * relPerm * area / length
-calcShapeAL t mat = calcAL (permeability mat) (calcMagArea t) (calcMagLength t)
-calcL t mat current turns = (calcShapeAL t mat) * turns * turns * (permeability_bias mat (calcH t turns current)) 
-
 calcTurns shape mat cable current targetL tolerance guess
     | abs(closeness) < tolerance = [(guess, result)]
     | guess > (calcWireMaxTurns shape cable) = [(guess * 10, 0)]
     | otherwise = (guess, result): (calcTurns shape mat cable current targetL tolerance (newguess))
     where result = calcL shape mat current guess
           closeness = getPercentError result targetL
-          newguess = guess / (1 + 0.5 * closeness)
+          newguess = guess / (1 + 0.5 * closeness)   
 
+tweakInductorCalc mat max_curr targetL toleranceL driver cond gain steps shape = headOrEmpty lessPower
+    where best_result = shape
+          result_list = [inductorOptimumWire mat x max_curr targetL toleranceL driver cond | x <- tweak_shapes]
+          resf = inductorFilterSort result_list driver
+          opower = totalInductorPower driver (inductorOptimumWire mat shape max_curr targetL toleranceL driver cond)
+          lessPower = filter ((< opower) . (totalInductorPower driver)) resf
+          tweak_shapes = tweakInductor shape gain steps
 
-wire_power :: Shape -> Cable -> Double -> [(Double, Double)] -> Double
-wire_power (ToroidRect a b c) d e f =  calcWirePower (ToroidRect a b c) d e f
-wire_power (EEcore a b) c d e = a * d
-       
-calcMagLength (ToroidRect id od thick) = pi * (id + od) * 0.5
-calcMagArea (ToroidRect id od thick) = (od-id) * 0.5 * thick
+tweakInductorStage :: [Inductor] -> (Shape -> [Inductor]) -> [Inductor]
+tweakInductorStage [] _ = []
+tweakInductorStage (x:_) calc = newval ++ tweakInductorStage newval calc
+    where newval = calc (ind_shape x)
 
-calcWindingArea :: Shape -> Double
-calcWindingArea (ToroidRect id od thick) = pi * 0.25 * id * id
+tweakInductorRecursive ind max_curr targetL toleranceL driver cond gain steps
+    | null calc = []
+    | otherwise = [ind] ++ stuff
+    where calc = tweakInductorCalc (ind_mat ind) max_curr targetL toleranceL driver cond gain steps (ind_shape ind)
+          stuff = (tweakInductorRecursive (head calc) max_curr targetL toleranceL driver cond (gain * 0.9) steps)
 
-calcWindingPercent s turns c = (pi * 0.25 * (cableOD c) * (cableOD c) * turns) / (calcWindingArea s)
+runInductorRecursive mat shape max_curr targetL toleranceL signal cond gain steps = [firstL] ++ (tweakInductorRecursive firstL max_curr targetL toleranceL signal cond gain steps)
+    where firstL = head (inductorSort (makeInductorMatShape max_curr targetL toleranceL signal cond (mat, shape)) (totalInductorPower signal))
+          
+inductorOptimumWire mat shape max_curr targetL toleranceL driver cond = head notFullList
+    where rlist = [makeInductor mat shape x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
+          notFullList = filter notfull rlist
 
-calcWireLayers :: Shape -> Cable -> Double
-calcWireLayers (ToroidRect id od thick) c = fromIntegral(floor ((sqrt 0.3) * id * 0.5 / (cableOD c)))
-
-calcWireLayerTurns :: Shape -> Cable -> Double -> Double
-calcWireLayerTurns (ToroidRect id od thick) c n = fromIntegral (floor ((id - ((n - 0.5) * (cableOD c))) * pi / (cableOD c)))
-
-calcWireMaxTurns t c = fromIntegral(floor((calcWindingArea t) / (pi * (cableOD c)**2 * 0.25)))
-
-calcWireLayerTurnLength :: Shape -> Cable -> Double -> Double
-calcWireLayerTurnLength (ToroidRect id od thick) c n = od-id+thick+thick+(cableOD c)+(cableOD c)+4*(cableOD c)*(n-1)
-
-calcWireMaxVolume :: Shape -> Double
-calcWireMaxVolume (ToroidRect id od th) = pi*ir*ir * (ir + h + 2*(or - ir)) + (pi * id * id / od + pi * h) * ((id*id+od*od)/4 - or*or)
-    where od2 = ((id*id)+(od*od))**0.5
-          ir = id * 0.5
-          or = od * 0.5
-          h = th * 0.5
-
-calcWireMaxLength t c = wire_volume / wire_area
-    where wire_area = (cableOD c)**2 * pi * 0.25
-          wire_volume = calcWireMaxVolume t
-
-calcWireLength t w turns = (turns / (calcWireMaxTurns t w)) * (calcWireMaxLength t w)          
-       
+powerResults mat max_curr targetL toleranceL driver a = ilist
+    where ilist = [(a, makeInductorFindWire mat x max_curr targetL toleranceL driver) | x <- shapeMaker a]
+          shapeMaker y = [ToroidRect (x/1000) 0.05 0.06 | x <- y]
+          
+makeInductorMatShape max_curr targetL toleranceL driver cond pair =
+    filter (notfull) [makeInductor (fst pair) (snd pair) wire max_curr targetL toleranceL | wire <- sortedWirePowerTable driver cond]
+          
  --[(tesla, [(hertz, kw/m^3)]]
 pc40_cl_60c = [ 
     (0.05, 

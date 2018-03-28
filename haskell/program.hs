@@ -118,10 +118,6 @@ testFunction x
 
 toroidChart a b c d e f mat max_curr targetL toleranceL driver = [inductorOptimumWire mat x max_curr targetL toleranceL driver | x <- (toroidMaker a b c d e f)]
 toroidMaker a b c d e f = [ToroidRect (mmToMeter (a*x)) (mmToMeter (b*y)) (mmToMeter (c*z)) | x <- d, y <- e, z <- f, (a*x) < (b*y)]
-
-inductorFilterSort ind_l driver = sorted
-    where notFullList = filter notfull ind_l
-          sorted = inductorSort notFullList (totalInductorPower driver)
        
 graphMaker :: Material -> Double -> (Double -> Double) -> Double -> Double -> Double -> [[Char]]
 graphMaker mat freq func minx maxx steps= [do printf "%.4f, %.4f" (x) (logBase 10 (func (10**x))) | x <- values]
@@ -154,61 +150,12 @@ prettyPrintInductor ind driver = do (putStr . show) (ind_mat ind)
                                     putStr " core"
                                     putStr "\n\n"
 
-                             
-tweakInductor :: Shape -> Double -> Double -> [Shape]                             
-tweakInductor (ToroidRect x y z) gain steps  = outp
-    where mul = map ((10**) . (*gain) . (/10)) [-steps..steps]
-          outp = [ToroidRect mx y z | mx <- map (*x) mul, my <- map (*y) mul, mz <- map (*z) mul, my > mx]
-
-tweakInductorCalc mat max_curr targetL toleranceL driver cond gain steps shape = headOrEmpty lessPower
-    where best_result = shape
-          result_list = [inductorOptimumWire mat x max_curr targetL toleranceL driver cond | x <- tweak_shapes]
-          resf = inductorFilterSort result_list driver
-          opower = totalInductorPower driver (inductorOptimumWire mat shape max_curr targetL toleranceL driver cond)
-          lessPower = filter ((< opower) . (totalInductorPower driver)) resf
-          tweak_shapes = tweakInductor shape gain steps
-
-tweakInductorStage :: [Inductor] -> (Shape -> [Inductor]) -> [Inductor]
-tweakInductorStage [] _ = []
-tweakInductorStage (x:_) calc = newval ++ tweakInductorStage newval calc
-    where newval = calc (ind_shape x)
-
-testL = head (inductorSort (makeInductorMatShape 15.4 1.5e-3 0.1 pfc_signal (conductors!!0) (PC40, me3)) (totalInductorPower pfc_signal))
-
-tweakInductorRecursive ind max_curr targetL toleranceL driver cond gain steps
-    | null calc = []
-    | otherwise = [ind] ++ stuff
-    where calc = tweakInductorCalc (ind_mat ind) max_curr targetL toleranceL driver cond gain steps (ind_shape ind)
-          stuff = (tweakInductorRecursive (head calc) max_curr targetL toleranceL driver cond (gain * 0.9) steps)
-
-runInductorRecursive mat shape max_curr targetL toleranceL signal cond gain steps = [firstL] ++ (tweakInductorRecursive firstL max_curr targetL toleranceL signal cond gain steps)
-    where firstL = head (inductorSort (makeInductorMatShape max_curr targetL toleranceL signal cond (mat, shape)) (totalInductorPower signal))
-          
-inductorOptimumWire mat shape max_curr targetL toleranceL driver cond = head notFullList
-    where rlist = [makeInductor mat shape x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
-          notFullList = filter notfull rlist
-
-powerResults mat max_curr targetL toleranceL driver a = ilist
-    where ilist = [(a, makeInductorFindWire mat x max_curr targetL toleranceL driver) | x <- shapeMaker a]
-          shapeMaker y = [ToroidRect (x/1000) 0.05 0.06 | x <- y]
-
-
-comboMatShapePair mats shapes = [(a, b) | a <- mats, b <- shapes]
-          
-makeInductorMatShape max_curr targetL toleranceL driver cond pair =
-    filter (notfull) [makeInductor (fst pair) (snd pair) wire max_curr targetL toleranceL | wire <- sortedWirePowerTable driver cond]
-    
-buildInductor pairs max_curr targetL toleranceL driver cond =
-    [makeInductor mat shape wire max_curr targetL toleranceL | mat <- (take 7 allMaterial), wire <- sortedWirePowerTable driver cond, shape <- specialToroids]
-          
 power_i2r (f, i) r = RmsPower f (i * i * r);
 
 power (RmsPower _ p) = p
 freq (RmsPower f _) = f
 
 total_power t = sqrt (sum [(power x) * (power x) | x <- t])
-
-allMaterial = [(minBound::Material) ..]
 
 pfc_signal = [ (60.0, 14.0), (40000.0, 1.4)]
    
@@ -218,6 +165,7 @@ me = ToroidRect (mmToMeter 14.7) (mmToMeter 26.9) (mmToMeter 11.2)
 me2 = ToroidRect (mmToMeter 102.4) (mmToMeter 165.1) (mmToMeter 31.75)
 me3 = ToroidRect (mmToMeter 65) (mmToMeter 102) (mmToMeter 20)
 
+testL = head (inductorSort (makeInductorMatShape 15.4 1.5e-3 0.1 pfc_signal (conductors!!0) (PC40, me3)) (totalInductorPower pfc_signal))
 
 --[(calcWireLayerTurnLength me (magnetWire!!4) x) | x <- [1..(fromIntegral (calcWireLayers me (magnetWire!!4)))]]
 
