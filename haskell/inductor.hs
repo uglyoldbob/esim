@@ -9,38 +9,33 @@ import Wire
 --EEcore is a core made of two E shape sections
 
 --ToroidRect ID OD height coating_thickness
-data Shape = ToroidRect Double Double Double | EEcore Double Double deriving (Show)
+data Shape = ToroidRect Double Double Double Double | EEcore Double Double deriving (Show)
 
 --many things can be calculated knowing only the shape of an inductor
 
-calcVolume :: Shape -> Double
-calcVolume (ToroidRect id od thick) = ((od * od * 0.25) - (id * id * 0.25)) * pi * thick
+calcMagneticVolume :: Shape -> Double
+calcMagneticVolume (ToroidRect id od thick coating) = ((od * od * 0.25) - (id * id * 0.25)) * pi * thick
 
 calcWindingArea :: Shape -> Double
-calcWindingArea (ToroidRect id od thick) = pi * 0.25 * id * id
+calcWindingArea (ToroidRect mid mod mthick coating) = pi * 0.25 * id * id
+    where id = mid - 2*coating
 
 calcWireMaxVolume :: Shape -> Double
-calcWireMaxVolume (ToroidRect id od th) = pi*ir*ir * (ir + h + 2*(or - ir)) + (pi * id * id / od + pi * h) * ((id*id+od*od)/4 - or*or)
+calcWireMaxVolume (ToroidRect mid mod mth coating) = pi*ir*ir * (ir + h + 2*(or - ir)) + (pi * id * id / od + pi * h) * ((id*id+od*od)/4 - or*or)
     where od2 = ((id*id)+(od*od))**0.5
           ir = id * 0.5
           or = od * 0.5
           h = th * 0.5
+          id = mid - 2*coating
+          od = mod + 2*coating
+          th = mth + 2*coating
 
-calcMagLength (ToroidRect id od thick) = pi * (id + od) * 0.5
-calcMagArea (ToroidRect id od thick) = (od-id) * 0.5 * thick
+calcMagLength (ToroidRect id od thick coating) = pi * (id + od) * 0.5
+calcMagArea (ToroidRect id od thick coating) = (od-id) * 0.5 * thick
 
 calcWindingPercent s turns c = (pi * 0.25 * (cableOD c) * (cableOD c) * turns) / (calcWindingArea s)
 
-calcWireLayers :: Shape -> Cable -> Double
-calcWireLayers (ToroidRect id od thick) c = fromIntegral(floor ((sqrt 0.3) * id * 0.5 / (cableOD c)))
-
-calcWireLayerTurns :: Shape -> Cable -> Double -> Double
-calcWireLayerTurns (ToroidRect id od thick) c n = fromIntegral (floor ((id - ((n - 0.5) * (cableOD c))) * pi / (cableOD c)))
-
 calcWireMaxTurns t c = fromIntegral(floor((calcWindingArea t) / (pi * (cableOD c)**2 * 0.25)))
-
-calcWireLayerTurnLength :: Shape -> Cable -> Double -> Double
-calcWireLayerTurnLength (ToroidRect id od thick) c n = od-id+thick+thick+(cableOD c)+(cableOD c)+4*(cableOD c)*(n-1)
 
 calcWireMaxLength t c = wire_volume / wire_area
     where wire_area = (cableOD c)**2 * pi * 0.25
@@ -50,18 +45,21 @@ calcWireLength t w turns = (turns / (calcWireMaxTurns t w)) * (calcWireMaxLength
           
 --at / cm
 calcH :: Shape -> Double -> Double -> Double
-calcH (ToroidRect id od thick) turns current = 0.01 * turns * current / (pi * (id + od) * 0.5)
+calcH (ToroidRect id od thick coating) turns current = 0.01 * turns * current / (pi * (id + od) * 0.5)
 
 --create an array of inductor shapes by tweaking an existing shape
 tweakInductor :: Shape -> Double -> Double -> [Shape]                             
-tweakInductor (ToroidRect x y z) gain steps  = outp
+tweakInductor (ToroidRect x y z c) gain steps  = outp
     where mul = map ((10**) . (*gain) . (/10)) [-steps..steps]
-          outp = [ToroidRect mx y z | mx <- map (*x) mul, my <- map (*y) mul, mz <- map (*z) mul, my > mx]
+          outp = [ToroidRect mx y z c | mx <- map (*x) mul, my <- map (*y) mul, mz <- map (*z) mul, my > mx]
 
 data Material = KoolMu14 | KoolMu26 | KoolMu40 | KoolMu60 | KoolMu75 | KoolMu90 | KoolMu125 | PC40 deriving (Show, Enum, Bounded)
 allMaterial = [(minBound::Material) ..]
 
-data InductorCore = InductorCore Material Shape deriving (Show)
+data InductorCore = InductorCore [Char] Material Shape deriving (Show)
+
+coreName (InductorCore n _ _) = n
+coreMaterial (InductorCore _ m _) = m
 
 --a few things can be calculated knowing the material an inductor is made from
 
@@ -115,8 +113,8 @@ calcB mat j
 
 --some things need shape and material to calculate
 calcAL relPerm area length = (absolute_permeability) * relPerm * area / length
-calcShapeAL (InductorCore mat shape) = calcAL (permeability mat) (calcMagArea shape) (calcMagLength shape)
-calcL (InductorCore mat shape) current turns = (calcShapeAL (InductorCore mat shape)) * turns * turns * (permeability_bias mat (calcH shape turns current)) 
+calcCoreAL (InductorCore n mat shape) = calcAL (permeability mat) (calcMagArea shape) (calcMagLength shape)
+calcL (InductorCore n mat shape) current turns = (calcCoreAL (InductorCore n mat shape)) * turns * turns * (permeability_bias mat (calcH shape turns current)) 
 
        
 --things to calculate
@@ -142,26 +140,26 @@ inductorImpedance ind freq = [a, b]
 notfull ind = (ind_filled ind) < 0.7
 
 --calculate number of turns to hit the desired minimum inductance
-calcTurns (InductorCore mat shape) cable current targetL tolerance guess
+calcTurns (InductorCore n mat shape) cable current targetL tolerance guess
     | abs(closeness) < tolerance = [(guess, result)]
     | guess > (calcWireMaxTurns shape cable) = [(guess * 10, 0)]
-    | otherwise = (guess, result): (calcTurns (InductorCore mat shape) cable current targetL tolerance (newguess))
-    where result = calcL (InductorCore mat shape) current guess
+    | otherwise = (guess, result): (calcTurns (InductorCore n mat shape) cable current targetL tolerance (newguess))
+    where result = calcL (InductorCore n mat shape) current guess
           closeness = getPercentError result targetL
           newguess = guess / (1 + 0.75 * closeness)
     
-makeInductor (InductorCore mat shape) cable max_curr targetL toleranceL = 
-    Inductor achieved maxl (InductorCore mat shape) turns percent cable length
-    where turns_math = last(calcTurns (InductorCore mat shape) cable max_curr targetL toleranceL initial_turns)
-          initial_turns = fromIntegral(truncate ((targetL / (calcShapeAL (InductorCore mat shape)))**0.5))
-          maxl = calcL (InductorCore mat shape) 0.01 turns
+makeInductor (InductorCore n mat shape) cable max_curr targetL toleranceL = 
+    Inductor achieved maxl (InductorCore n mat shape) turns percent cable length
+    where turns_math = last(calcTurns (InductorCore n mat shape) cable max_curr targetL toleranceL initial_turns)
+          initial_turns = fromIntegral(truncate ((targetL / (calcCoreAL (InductorCore n mat shape)))**0.5))
+          maxl = calcL (InductorCore n mat shape) 0.01 turns
           achieved = snd (turns_math)
           turns = fst (turns_math)
           percent = calcWindingPercent shape turns cable
           length = (calcWireLength shape cable turns)
           
-inductorOptimumWire (InductorCore mat shape) max_curr targetL toleranceL driver cond = head notFullList
-    where rlist = [makeInductor (InductorCore mat shape) x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
+inductorOptimumWire (InductorCore n mat shape) max_curr targetL toleranceL driver cond = head notFullList
+    where rlist = [makeInductor (InductorCore n mat shape) x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
           notFullList = filter notfull rlist
 
 data InductorUsage = InductorUsageBuck | InductorUsageBoost deriving (Show)
@@ -171,37 +169,37 @@ ind_c_pwr driver ind = calcCorePower (ind_core ind) (ind_turns ind) driver
 totalInductorPower driver ind = (ind_w_pwr driver ind) + (ind_c_pwr driver ind)
 ind_max_t ind max_curr = calcB ((mat . ind_core) ind) h
     where h = calcH ((sh . ind_core) ind) (ind_turns ind) max_curr
-          sh (InductorCore m s) = s
-          mat (InductorCore m s) = m
+          sh (InductorCore n m s) = s
+          mat (InductorCore n m s) = m
 
 calcCorePower :: InductorCore -> Double -> [(Double, Double)] -> Double
-calcCorePower (InductorCore mat shape) turns signal
+calcCorePower (InductorCore n mat shape) turns signal
     | (length signal == 2) = rmsCalc power_list
     | (length signal == 1) = density * volume * 1000
-    where volume = calcVolume shape
+    where volume = calcMagneticVolume shape
           flux = calcB mat
           h = calcH shape turns
           density = (calcCoreLossDensity mat (flux (h (sqrt(2) * (snd (signal!!0))))) (fst (signal!!0)))
-          power_list = pfc_core_loss (InductorCore mat shape) turns signal
+          power_list = pfc_core_loss (InductorCore n mat shape) turns signal
 
 
 
-calcCorePowerMinMax (InductorCore mat shape) turns fr minI maxI = density * volume * 1000
-    where volume = calcVolume shape
+calcCorePowerMinMax (InductorCore n mat shape) turns fr minI maxI = density * volume * 1000
+    where volume = calcMagneticVolume shape
           minh = calcH shape turns minI
           maxh = calcH shape turns maxI
           density = (calcCoreLossDensity mat deltab fr)
           deltab = ((calcB mat maxh) - (calcB mat minh)) * 0.5
        
 pfc_core_loss :: InductorCore -> Double -> [(Double, Double)] -> [Double]
-pfc_core_loss (InductorCore mat shape) turns signal
-    | low_freq > 0.0 = [calcCorePowerMinMax (InductorCore mat shape) turns high_freq (calc * (1 - (high_peak / low_peak))) (calc * (1 + (high_peak / low_peak))) | calc <- range]
-    | otherwise = [calcCorePowerMinMax (InductorCore mat shape) turns high_freq ((snd (signal!!0)) - high_peak) ((snd (signal!!0)) + high_peak)]
+pfc_core_loss (InductorCore n mat shape) turns signal
+    | low_freq > 0.0 = [calcCorePowerMinMax (InductorCore n mat shape) turns high_freq (calc * (1 - (high_peak / low_peak))) (calc * (1 + (high_peak / low_peak))) | calc <- range]
+    | otherwise = [calcCorePowerMinMax (InductorCore n mat shape) turns high_freq ((snd (signal!!0)) - high_peak) ((snd (signal!!0)) + high_peak)]
     where low_freq = (fst (signal!!0))
           high_freq = (fst (signal!!1))
           low_peak = (snd (signal!!0)) * sqrt(2)
           high_peak = (snd (signal!!1)) * sqrt(2)
-          volume = calcVolume shape
+          volume = calcMagneticVolume shape
           h = calcH shape turns
           density x y = (calcCoreLossDensity mat (calcB mat (h x)) y)
           range = (map ((low_peak * ) . sin . (0.01*pi*)) [0..99])
@@ -218,8 +216,8 @@ maybeInductorPower ind driver
  | otherwise = Nothing
           
 makeInductorFindWire :: InductorCore -> Double -> Double -> Double -> [(Double, Double)] -> Conductor -> Maybe Inductor          
-makeInductorFindWire (InductorCore mat shape) max_curr targetL toleranceL driver cond = maybeHead notFullList
-    where rlist = [makeInductor (InductorCore mat shape) x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
+makeInductorFindWire (InductorCore n mat shape) max_curr targetL toleranceL driver cond = maybeHead notFullList
+    where rlist = [makeInductor (InductorCore n mat shape) x max_curr targetL toleranceL | x <- sortedWirePowerTable driver cond]
           notFullList = filter notfull rlist
 
  --[(tesla, [(hertz, kw/m^3)]]
@@ -512,5 +510,61 @@ pc40_bh_60c = [ (0, 0),
 
 --mag-inc
 magIncCores = [
-    InductorCore KoolMu14 (ToroidRect 24.1e-3 39.9e-3 14.5e-3)
+    InductorCore "MagInc 0077257A7" KoolMu14 (ToroidRect 24.1e-3 39.9e-3 14.5e-3 0.4e-3),
+    InductorCore "MagInc 0077092A7" KoolMu14 (ToroidRect 28.7e-3 46.7e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077744A7" KoolMu14 (ToroidRect 24.1e-3 46.7e-3 18.0e-3 0.4e-3),
+    InductorCore "MagInc 0077718A7" KoolMu14 (ToroidRect 31.8e-3 50.8e-3 13.5e-3 0.4e-3),
+    InductorCore "MagInc 0077112A7" KoolMu14 (ToroidRect 35.6e-3 57.2e-3 14.0e-3 0.4e-3),
+    InductorCore "MagInc 0077190A7" KoolMu14 (ToroidRect 26.4e-3 57.2e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077614A7" KoolMu14 (ToroidRect 32.6e-3 62.0e-3 25.0e-3 0.4e-3),
+    InductorCore "MagInc 0077075A7" KoolMu14 (ToroidRect 36.0e-3 68.0e-3 20.0e-3 0.4e-3),
+    InductorCore "MagInc 0077774A7" KoolMu14 (ToroidRect 39.34e-3 77.8e-3 25.85e-3 0.4e-3),
+    InductorCore "MagInc 0077734A7" KoolMu14 (ToroidRect 45.3e-3 74.1e-3 35.0e-3 0.4e-3),
+    InductorCore "MagInc 0077869A7" KoolMu14 (ToroidRect 49.2e-3 77.8e-3 12.7e-3 0.4e-3),
+    InductorCore "MagInc 0077909A7" KoolMu14 (ToroidRect 49.2e-3 77.8e-3 15.9e-3 0.4e-3),
+    InductorCore "MagInc 0077101A7" KoolMu14 (ToroidRect 57.2e-3 101.6e-3 16.5e-3 0.4e-3),
+    InductorCore "MagInc 0077336A7" KoolMu14 (ToroidRect 78.6e-3 132.6e-3 25.4e-3 0.4e-3),
+    
+    InductorCore "MagInc 0077052A7" KoolMu26 (ToroidRect 7.62e-3 12.7e-3 4.75e-3 0.4e-3),
+    InductorCore "MagInc 0077312A7" KoolMu26 (ToroidRect 14.0e-3 22.9e-3 7.62e-3 0.4e-3),
+    InductorCore "MagInc 0077352A7" KoolMu26 (ToroidRect 14.4e-3 23.6e-3 8.89e-3 0.4e-3),
+    InductorCore "MagInc 0077932A7" KoolMu26 (ToroidRect 14.7e-3 26.9e-3 11.2e-3 0.4e-3),
+    InductorCore "MagInc 0077550A7" KoolMu26 (ToroidRect 20.1e-3 32.8e-3 10.7e-3 0.4e-3),
+    InductorCore "MagInc 0077587A7" KoolMu26 (ToroidRect 23.4e-3 34.3e-3 8.89e-3 0.4e-3),
+    InductorCore "MagInc 0077326A7" KoolMu26 (ToroidRect 22.4e-3 35.8e-3 10.5e-3 0.4e-3),
+    InductorCore "MagInc 0077256A7" KoolMu26 (ToroidRect 24.1e-3 39.9e-3 14.5e-3 0.4e-3),
+    InductorCore "MagInc 0077091A7" KoolMu26 (ToroidRect 28.7e-3 46.7e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077440A7" KoolMu26 (ToroidRect 24.1e-3 46.7e-3 18.0e-3 0.4e-3),
+    InductorCore "MagInc 0077717A7" KoolMu26 (ToroidRect 31.8e-3 50.8e-3 13.5e-3 0.4e-3),
+    InductorCore "MagInc 0077111A7" KoolMu26 (ToroidRect 35.6e-3 57.2e-3 14.0e-3 0.4e-3),
+    InductorCore "MagInc 0077191A7" KoolMu26 (ToroidRect 26.4e-3 57.2e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077615A7" KoolMu26 (ToroidRect 32.6e-3 62.0e-3 25.0e-3 0.4e-3),
+    InductorCore "MagInc 0077775A7" KoolMu26 (ToroidRect 39.34e-3 77.8e-3 25.85e-3 0.4e-3),
+    InductorCore "MagInc 0077735A7" KoolMu26 (ToroidRect 45.3e-3 74.1e-3 35.0e-3 0.4e-3),
+    InductorCore "MagInc 0077868A7" KoolMu26 (ToroidRect 49.2e-3 77.8e-3 12.7e-3 0.4e-3),
+    InductorCore "MagInc 0077908A7" KoolMu26 (ToroidRect 49.2e-3 77.8e-3 15.9e-3 0.4e-3),
+    InductorCore "MagInc 0077102A7" KoolMu26 (ToroidRect 57.2e-3 101.6e-3 16.5e-3 0.4e-3),
+    InductorCore "MagInc 0077337A7" KoolMu26 (ToroidRect 78.6e-3 132.6e-3 25.4e-3 0.4e-3),
+    InductorCore "MagInc 0077165A7" KoolMu26 (ToroidRect 102.4e-3 165.1e-3 31.75e-3 0.4e-3),
+    
+    InductorCore "MagInc 0077847A7" KoolMu40 (ToroidRect 12.7e-3 20.3e-3 6.35e-3 0.4e-3),
+    InductorCore "MagInc 0077316A7" KoolMu40 (ToroidRect 14.0e-3 22.9e-3 7.62e-3 0.4e-3),
+    InductorCore "MagInc 0077356A7" KoolMu40 (ToroidRect 14.4e-3 23.6e-3 8.89e-3 0.4e-3),
+    InductorCore "MagInc 0077936A7" KoolMu40 (ToroidRect 14.7e-3 26.9e-3 11.2e-3 0.4e-3),
+    InductorCore "MagInc 0077555A7" KoolMu40 (ToroidRect 20.1e-3 32.8e-3 10.7e-3 0.4e-3),
+    InductorCore "MagInc 0077591A7" KoolMu40 (ToroidRect 23.4e-3 34.3e-3 8.89e-3 0.4e-3),
+    InductorCore "MagInc 0077330A7" KoolMu40 (ToroidRect 22.4e-3 35.8e-3 10.5e-3 0.4e-3),
+    InductorCore "MagInc 0077260A7" KoolMu40 (ToroidRect 24.1e-3 39.9e-3 14.5e-3 0.4e-3),
+    InductorCore "MagInc 0077095A7" KoolMu40 (ToroidRect 28.7e-3 46.7e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077431A7" KoolMu40 (ToroidRect 24.1e-3 46.7e-3 18.0e-3 0.4e-3),
+    InductorCore "MagInc 0077721A7" KoolMu40 (ToroidRect 31.8e-3 50.8e-3 13.5e-3 0.4e-3),
+    InductorCore "MagInc 0077212A7" KoolMu40 (ToroidRect 35.6e-3 57.2e-3 14.0e-3 0.4e-3),
+    InductorCore "MagInc 0077189A7" KoolMu40 (ToroidRect 26.4e-3 57.2e-3 15.2e-3 0.4e-3),
+    InductorCore "MagInc 0077615A7" KoolMu40 (ToroidRect 32.6e-3 62.0e-3 25.0e-3 0.4e-3),
+    InductorCore "MagInc 0077776A7" KoolMu40 (ToroidRect 39.34e-3 77.8e-3 25.85e-3 0.4e-3),
+    InductorCore "MagInc 0077736A7" KoolMu40 (ToroidRect 45.3e-3 74.1e-3 35.0e-3 0.4e-3),
+    InductorCore "MagInc 0077872A7" KoolMu40 (ToroidRect 49.2e-3 77.8e-3 12.7e-3 0.4e-3),
+    InductorCore "MagInc 0077912A7" KoolMu40 (ToroidRect 49.2e-3 77.8e-3 15.9e-3 0.4e-3),
+    InductorCore "MagInc 0077100A7" KoolMu40 (ToroidRect 57.2e-3 101.6e-3 16.5e-3 0.4e-3),
+    InductorCore "MagInc 0077338A7" KoolMu40 (ToroidRect 78.6e-3 132.6e-3 25.4e-3 0.4e-3)
     ]
