@@ -165,7 +165,10 @@ me = ToroidRect (mmToMeter 14.7) (mmToMeter 26.9) (mmToMeter 11.2)
 me2 = ToroidRect (mmToMeter 102.4) (mmToMeter 165.1) (mmToMeter 31.75)
 me3 = ToroidRect (mmToMeter 65) (mmToMeter 102) (mmToMeter 20)
 
-testL = head (inductorSort (makeInductorMatShape 15.4 1.5e-3 0.1 pfc_signal (conductors!!0) (PC40, me3)) (totalInductorPower pfc_signal))
+--find optimum wire configuration for a given material, shape, conductor, and driving signal
+testL d = head (inductorSort (makeInductorMatShape 15.4 1.5e-3 0.1 d (conductors!!0) (PC40, me3)) (totalInductorPower d))
+
+do_a_thing driver = prettyPrintInductor (testL driver) driver
 
 --[(calcWireLayerTurnLength me (magnetWire!!4) x) | x <- [1..(fromIntegral (calcWireLayers me (magnetWire!!4)))]]
 
